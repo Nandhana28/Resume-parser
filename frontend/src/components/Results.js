@@ -1,182 +1,237 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import AdvancedAnalysis from './AdvancedAnalysis';
-
-const ConfusionMatrix = ({ matrix, title }) => {
-  return (
-    <div className="confusion-matrix">
-      <h4>{title}</h4>
-      <div className="matrix-grid">
-        <div className="matrix-labels">
-          <div className="label-corner"></div>
-          <div className="label-top">Predicted Rejected</div>
-          <div className="label-top">Predicted Accepted</div>
-        </div>
-        <div className="matrix-row">
-          <div className="label-left">Actual Rejected</div>
-          <div className="matrix-cell tn">{matrix[0][0]}</div>
-          <div className="matrix-cell fp">{matrix[0][1]}</div>
-        </div>
-        <div className="matrix-row">
-          <div className="label-left">Actual Accepted</div>
-          <div className="matrix-cell fn">{matrix[1][0]}</div>
-          <div className="matrix-cell tp">{matrix[1][1]}</div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const MetricsCard = ({ model, metrics }) => {
-  return (
-    <motion.div
-      className="metrics-card-horizontal"
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3 }}
-    >
-      <div className="model-header-horizontal">
-        <h4>{model}</h4>
-      </div>
-      <div className="model-content-horizontal">
-        <div className="metrics-left">
-          <div className="metric-item">
-            <span className="metric-label">Accuracy</span>
-            <span className="metric-value">{(metrics.accuracy * 100).toFixed(1)}%</span>
-          </div>
-          <div className="metric-item">
-            <span className="metric-label">Precision</span>
-            <span className="metric-value">{(metrics.precision * 100).toFixed(1)}%</span>
-          </div>
-          <div className="metric-item">
-            <span className="metric-label">Recall</span>
-            <span className="metric-value">{(metrics.recall * 100).toFixed(1)}%</span>
-          </div>
-          <div className="metric-item">
-            <span className="metric-label">F1 Score</span>
-            <span className="metric-value">{(metrics.f1_score * 100).toFixed(1)}%</span>
-          </div>
-          <div className="metric-item">
-            <span className="metric-label">AUC Score</span>
-            <span className="metric-value">{(metrics.auc_score * 100).toFixed(1)}%</span>
-          </div>
-        </div>
-        <div className="confusion-right">
-          <ConfusionMatrix matrix={metrics.confusion_matrix} title="Confusion Matrix" />
-        </div>
-      </div>
-    </motion.div>
-  );
-};
+import axios from 'axios';
 
 const Results = ({ data, onReset }) => {
-  const [showAnalysis, setShowAnalysis] = useState(false);
-
+  const [filteredJobs, setFilteredJobs] = useState(data.jobs);
+  const [selLoc, setSelLoc] = useState('');
+  const [selSkills, setSelSkills] = useState([]);
+  const [minMatch, setMinMatch] = useState(10);
+  const [isFiltering, setIsFiltering] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const cacheInfo = data.cache_info || {};
+  
+  const applyFilters = async () => {
+    setIsFiltering(true);
+    try {
+      const resp = await axios.post('http://localhost:5000/api/filter-jobs', {
+        skills: data.skills,
+        location: selLoc || null,
+        skill_filters: selSkills,
+        min_match: minMatch
+      });
+      setFilteredJobs(resp.data.jobs);
+    } catch (err) {
+      console.error('Filter error:', err);
+    }
+    setIsFiltering(false);
+  };
+  
+  const resetFilters = () => {
+    setSelLoc('');
+    setSelSkills([]);
+    setMinMatch(10);
+    setFilteredJobs(data.jobs);
+  };
+  
+  const toggleSkill = (skill) => {
+    if (selSkills.includes(skill)) {
+      setSelSkills(selSkills.filter(s => s !== skill));
+    } else {
+      setSelSkills([...selSkills, skill]);
+    }
+  };
+  
+  const refreshJobs = async () => {
+    setIsRefreshing(true);
+    try {
+      const resp = await axios.post('http://localhost:5000/api/refresh-jobs');
+      alert(`Refreshed ${resp.data.jobs_count} jobs from live sources`);
+      window.location.reload();
+    } catch (err) {
+      console.error('Refresh error:', err);
+      alert('Failed to refresh jobs. Please try again.');
+    }
+    setIsRefreshing(false);
+  };
+  
+  const exportToExcel = async () => {
+    try {
+      const resp = await axios.post('http://localhost:5000/api/export-excel', {
+        filename: data.filename,
+        email: data.email,
+        phone: data.phone,
+        skills: data.skills,
+        jobs: filteredJobs
+      });
+      
+      const msg = `Excel report saved successfully\n\nLocation: ${resp.data.relative_path}\n\nFilename: ${resp.data.filename}`;
+      alert(msg);
+    } catch (err) {
+      console.error('Export error:', err);
+      alert('Failed to export to Excel. Please try again.');
+    }
+  };
+  
   return (
     <motion.div
-      className="results-container"
+      className="resultsContainer"
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
     >
-      <div className="results-card">
-        <div className="results-header">
-          <h2>Analysis Complete</h2>
-          <div className="header-buttons">
-            <button onClick={() => setShowAnalysis(!showAnalysis)} className="analysis-btn">
-              {showAnalysis ? 'Hide' : 'Show'} ML Analysis
+      <div className="resultsCard">
+        <div className="resultsHeader">
+          <div>
+            <h2>Resume Analysis Complete</h2>
+            {cacheInfo && (
+              <p className="cacheStatus">
+                {cacheInfo.is_fresh ? 'Fresh' : 'Expired'} - Jobs updated: {cacheInfo.last_updated}
+              </p>
+            )}
+          </div>
+          <div className="headerButtons">
+            <button onClick={exportToExcel} className="exportBtn">
+              Export to Excel
             </button>
-            <button onClick={onReset} className="reset-btn">
+            <button onClick={refreshJobs} className="refreshBtn" disabled={isRefreshing}>
+              {isRefreshing ? 'Refreshing...' : 'Refresh Jobs'}
+            </button>
+            <button onClick={onReset} className="resetBtn">
               Upload Another
             </button>
           </div>
         </div>
 
-        <div className="info-section">
-          <div className="info-item">
+        <div className="infoSection">
+          <div className="infoItem">
             <strong>Email:</strong> {data.email || 'Not found'}
           </div>
-          <div className="info-item">
+          <div className="infoItem">
             <strong>Phone:</strong> {data.phone || 'Not found'}
           </div>
-          <div className="info-item">
+          <div className="infoItem">
             <strong>File:</strong> {data.filename}
           </div>
           {data.skills && data.skills.length > 0 && (
-            <div className="info-item skills-item">
+            <div className="infoItem skillsItem">
               <strong>Detected Skills:</strong>
-              <div className="skills-tags">
+              <div className="skillsTags">
                 {data.skills.map((skill, idx) => (
-                  <span key={idx} className="skill-tag">{skill}</span>
+                  <span key={idx} className="skillTag">{skill}</span>
                 ))}
               </div>
             </div>
           )}
         </div>
 
-        <div className="jobs-section">
-          <h3>Recommended Jobs</h3>
-          {data.jobs && data.jobs.map((job, index) => (
+        <div className="filtersSection">
+          <h3>Filter Jobs</h3>
+          
+          <div className="filterRow">
+            <div className="filterGroup">
+              <label>Location:</label>
+              <select 
+                value={selLoc} 
+                onChange={(e) => setSelLoc(e.target.value)}
+                className="filterSelect"
+              >
+                <option value="">All Locations</option>
+                {data.available_locations && data.available_locations.map((loc, idx) => (
+                  <option key={idx} value={loc}>{loc}</option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="filterGroup">
+              <label>Min Match %:</label>
+              <input 
+                type="range" 
+                min="0" 
+                max="100" 
+                value={minMatch}
+                onChange={(e) => setMinMatch(parseInt(e.target.value))}
+                className="filterSlider"
+              />
+              <span className="matchValue">{minMatch}%</span>
+            </div>
+          </div>
+          
+          <div className="filterGroup">
+            <label>Required Skills:</label>
+            <div className="skillsMultiselect">
+              {data.available_skills && data.available_skills.slice(0, 20).map((skill, idx) => (
+                <button
+                  key={idx}
+                  className={`skillFilterBtn ${selSkills.includes(skill) ? 'active' : ''}`}
+                  onClick={() => toggleSkill(skill)}
+                >
+                  {skill}
+                </button>
+              ))}
+            </div>
+          </div>
+          
+          <div className="filterActions">
+            <button onClick={applyFilters} className="applyFilterBtn" disabled={isFiltering}>
+              {isFiltering ? 'Filtering...' : 'Apply Filters'}
+            </button>
+            <button onClick={resetFilters} className="resetFilterBtn">
+              Reset Filters
+            </button>
+          </div>
+        </div>
+
+        <div className="jobsSection">
+          <h3>Recommended Jobs ({filteredJobs ? filteredJobs.length : 0} matches)</h3>
+          {filteredJobs && filteredJobs.length > 0 ? filteredJobs.map((job, idx) => (
             <motion.div
-              key={index}
-              className="job-card"
+              key={idx}
+              className="jobCard"
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: index * 0.1 }}
+              transition={{ delay: idx * 0.1 }}
             >
-              <div className="job-header">
-                <div className="job-title">{job.title}</div>
-                <div className="match-badge">{job.match}% Match</div>
+              <div className="jobHeader">
+                <div className="jobTitleWrapper">
+                  <div className="jobTitle">{job.title}</div>
+                  {job.is_fallback && (
+                    <span className="fallbackBadge" title="From fallback database">Fallback</span>
+                  )}
+                </div>
+                <div className="matchBadge">{job.match}% Match</div>
               </div>
-              <div className="job-company">{job.company}</div>
-              <div className="job-description">{job.description}</div>
+              <div className="jobCompany">{job.company}</div>
+              {job.location && (
+                <div className="jobLocation">{job.location}</div>
+              )}
+              {job.scraped_at && (
+                <div className="jobTimestamp">Scraped: {job.scraped_at}</div>
+              )}
+              <div className="jobDesc">{job.description}</div>
               {job.matching_skills && job.matching_skills.length > 0 && (
-                <div className="matching-skills">
+                <div className="matchingSkills">
                   <strong>Matching Skills:</strong>
-                  <div className="skills-tags">
+                  <div className="skillsTags">
                     {job.matching_skills.map((skill, idx) => (
-                      <span key={idx} className="skill-tag match">{skill}</span>
+                      <span key={idx} className="skillTag match">{skill}</span>
                     ))}
                   </div>
                 </div>
               )}
+              {job.link && (
+                <a href={job.link} target="_blank" rel="noopener noreferrer" className="jobLink">
+                  View Job
+                </a>
+              )}
             </motion.div>
-          ))}
+          )) : (
+            <div className="noJobs">
+              <p>No matching jobs found. Try uploading a different resume or check your internet connection.</p>
+            </div>
+          )}
         </div>
       </div>
-
-      {showAnalysis && data.ml_analysis && (
-        <motion.div
-          className="analysis-section"
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: 'auto' }}
-          exit={{ opacity: 0, height: 0 }}
-        >
-          <h2 className="analysis-title">Machine Learning Model Analysis</h2>
-          
-          <div className="models-vertical">
-            <MetricsCard 
-              model="Decision Tree" 
-              metrics={data.ml_analysis.decision_tree}
-            />
-            <MetricsCard 
-              model="Logistic Regression" 
-              metrics={data.ml_analysis.logistic_regression}
-            />
-            <MetricsCard 
-              model="Random Forest" 
-              metrics={data.ml_analysis.random_forest}
-            />
-          </div>
-
-          <AdvancedAnalysis data={data.ml_analysis} />
-          
-          <div className="best-model">
-            <h3>Best Performing Model: Random Forest</h3>
-            <p>Based on accuracy and F1 score metrics</p>
-          </div>
-        </motion.div>
-      )}
     </motion.div>
   );
 };

@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import axios from 'axios';
 
 const FileUpload = ({ onUploadSuccess, loading, setLoading }) => {
-  const onDrop = useCallback(async (acceptedFiles) => {
+  const handleDrop = useCallback(async (acceptedFiles) => {
     if (acceptedFiles.length === 0) return;
     
     setLoading(true);
@@ -13,22 +13,24 @@ const FileUpload = ({ onUploadSuccess, loading, setLoading }) => {
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:5000/api/upload', formData, {
+      const resp = await axios.post('http://localhost:5000/api/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
       });
-      onUploadSuccess(response.data);
-    } catch (error) {
-      console.error('Upload error:', error);
-      alert('Error uploading file. Please try again.');
+      onUploadSuccess(resp.data);
+    } catch (err) {
+      console.error('Upload error:', err);
+      const errMsg = err.response?.data?.error || err.message || 'Unknown error';
+      alert(`Error uploading file: ${errMsg}`);
       setLoading(false);
     }
   }, [onUploadSuccess, setLoading]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
+    onDrop: handleDrop,
     accept: {
+      'application/pdf': ['.pdf'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
       'application/msword': ['.doc']
     },
@@ -38,7 +40,7 @@ const FileUpload = ({ onUploadSuccess, loading, setLoading }) => {
   if (loading) {
     return (
       <motion.div
-        className="upload-card"
+        className="uploadCard"
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.9 }}
@@ -46,7 +48,7 @@ const FileUpload = ({ onUploadSuccess, loading, setLoading }) => {
         <div className="loading">
           <div className="spinner"></div>
           <h3>Analyzing your resume</h3>
-          <p>Finding the best job matches for you</p>
+          <p>Scraping latest jobs and finding matches...</p>
         </div>
       </motion.div>
     );
@@ -54,7 +56,7 @@ const FileUpload = ({ onUploadSuccess, loading, setLoading }) => {
 
   return (
     <motion.div
-      className="upload-card"
+      className="uploadCard"
       initial={{ opacity: 0, scale: 0.9 }}
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.9 }}
@@ -62,7 +64,7 @@ const FileUpload = ({ onUploadSuccess, loading, setLoading }) => {
       <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
         <input {...getInputProps()} />
         <h3>Drop your resume here</h3>
-        <p>or click to browse (.docx files)</p>
+        <p>or click to browse (PDF, DOCX, DOC files)</p>
       </div>
     </motion.div>
   );
