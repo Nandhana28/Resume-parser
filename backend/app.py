@@ -1,202 +1,520 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
 from werkzeug.utils import secure_filename
 import docx2txt
 import re
-import numpy as np
 from collections import Counter
+import requests
+from bs4 import BeautifulSoup
+import PyPDF2
+from docx import Document
+import time
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.chart import BarChart, Reference
+from datetime import datetime
+import glob
 
 app = Flask(__name__)
 CORS(app)
 
 UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'docx', 'pdf'}
+ALLOWED_EXTENSIONS = {'docx', 'pdf', 'doc'}
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-JOB_DATABASE = [
-    {
-        'title': 'Data Scientist',
-        'company': 'Tech Corp',
-        'description': 'Looking for a Data Scientist with Python and ML experience',
-        'required_skills': ['python', 'machine learning', 'data analysis', 'statistics', 'pandas', 'numpy', 'scikit-learn']
-    },
-    {
-        'title': 'Machine Learning Engineer',
-        'company': 'AI Solutions',
-        'description': 'ML Engineer with experience in Python and data analysis',
-        'required_skills': ['python', 'machine learning', 'tensorflow', 'pytorch', 'deep learning', 'neural networks']
-    },
-    {
-        'title': 'Full Stack Developer',
-        'company': 'Web Innovations',
-        'description': 'Full Stack Developer proficient in JavaScript and React',
-        'required_skills': ['javascript', 'react', 'node.js', 'html', 'css', 'mongodb', 'express']
-    },
-    {
-        'title': 'Backend Developer',
-        'company': 'Cloud Systems',
-        'description': 'Backend Developer with expertise in Python and databases',
-        'required_skills': ['python', 'django', 'flask', 'postgresql', 'mysql', 'api', 'rest']
-    },
-    {
-        'title': 'Frontend Developer',
-        'company': 'Design Studio',
-        'description': 'Frontend Developer skilled in modern web technologies',
-        'required_skills': ['javascript', 'react', 'vue', 'angular', 'html', 'css', 'typescript']
-    },
-    {
-        'title': 'DevOps Engineer',
-        'company': 'Infrastructure Inc',
-        'description': 'DevOps Engineer with cloud and automation experience',
-        'required_skills': ['docker', 'kubernetes', 'aws', 'azure', 'jenkins', 'ci/cd', 'linux']
-    },
-    {
-        'title': 'Data Analyst',
-        'company': 'Analytics Pro',
-        'description': 'Data Analyst with strong SQL and visualization skills',
-        'required_skills': ['sql', 'excel', 'tableau', 'power bi', 'python', 'data visualization', 'statistics']
-    },
-    {
-        'title': 'Software Engineer',
-        'company': 'Software Solutions',
-        'description': 'Software Engineer with strong programming fundamentals',
-        'required_skills': ['java', 'python', 'c++', 'algorithms', 'data structures', 'git', 'agile']
-    },
-    {
-        'title': 'Mobile Developer',
-        'company': 'Mobile Apps Co',
-        'description': 'Mobile Developer for iOS and Android applications',
-        'required_skills': ['react native', 'flutter', 'swift', 'kotlin', 'mobile development', 'ios', 'android']
-    },
-    {
-        'title': 'Cloud Architect',
-        'company': 'Cloud Masters',
-        'description': 'Cloud Architect designing scalable cloud solutions',
-        'required_skills': ['aws', 'azure', 'gcp', 'cloud architecture', 'microservices', 'serverless', 'terraform']
+jobCache = []
+cacheTime = 0
+cacheDur = 1800
+
+def scrapeIndeed(kw="software engineer", loc="", maxJobs=20):
+    jobs = []
+    try:
+        qry = kw.replace(' ', '+')
+        locQry = loc.replace(' ', '+')
+        url = f"https://www.indeed.com/jobs?q={qry}&l={locQry}"
+        
+        hdrs = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+        
+        resp = requests.get(url, headers=hdrs, timeout=10)
+        
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            cards = soup.find_all('div', class_='job_seen_beacon')[:maxJobs]
+            
+            if not cards:
+                cards = soup.find_all('td', class_='resultContent')[:maxJobs]
+            
+            for card in cards:
+                try:
+                    titleElem = card.find('h2', class_='jobTitle')
+                    if not titleElem:
+                        titleElem = card.find('a', class_='jcs-JobTitle')
+                    
+                    compElem = card.find('span', class_='companyName')
+                    if not compElem:
+                        compElem = card.find('span', {'data-testid': 'company-name'})
+                    
+                    locElem = card.find('div', class_='companyLocation')
+                    if not locElem:
+                        locElem = card.find('div', {'data-testid': 'text-location'})
+                    
+                    linkElem = card.find('a', class_='jcs-JobTitle')
+                    if not linkElem:
+                        linkElem = card.find('a')
+                    
+                    if titleElem and compElem:
+                        title = titleElem.text.strip()
+                        job = {
+                            'title': title,
+                            'company': compElem.text.strip(),
+                            'location': locElem.text.strip() if locElem else 'Remote',
+                            'link': f"https://www.indeed.com{linkElem['href']}" if linkElem and linkElem.get('href') else '',
+                            'description': f"Looking for {title}",
+                            'required_skills': extractSkillsFromTitle(title)
+                        }
+                        jobs.append(job)
+                except Exception as e:
+                    print(f"Error parsing Indeed job: {e}")
+                    continue
+            
+            print(f"Scraped {len(jobs)} jobs from Indeed")
+        else:
+            print(f"Indeed fetch failed: {resp.status_code}")
+            
+    except Exception as e:
+        print(f"Error scraping Indeed: {e}")
+    
+    return jobs
+
+def scrapeRemoteOk(kw="software", maxJobs=20):
+    jobs = []
+    try:
+        url = "https://remoteok.com/api"
+        hdrs = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        resp = requests.get(url, headers=hdrs, timeout=10)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            listings = data[1:maxJobs+1] if len(data) > 1 else []
+            
+            for jobData in listings:
+                try:
+                    if isinstance(jobData, dict):
+                        title = jobData.get('position', 'N/A')
+                        comp = jobData.get('company', 'N/A')
+                        loc = jobData.get('location', 'Remote')
+                        tags = jobData.get('tags', [])
+                        
+                        job = {
+                            'title': title,
+                            'company': comp,
+                            'location': loc if loc else 'Remote',
+                            'link': jobData.get('url', ''),
+                            'description': jobData.get('description', f"{title} at {comp}")[:200],
+                            'required_skills': [tag.lower() for tag in tags[:5]] if tags else extractSkillsFromTitle(title)
+                        }
+                        jobs.append(job)
+                except Exception as e:
+                    print(f"Error parsing RemoteOK job: {e}")
+                    continue
+            
+            print(f"Scraped {len(jobs)} jobs from RemoteOK")
+        else:
+            print(f"RemoteOK fetch failed: {resp.status_code}")
+            
+    except Exception as e:
+        print(f"Error scraping RemoteOK: {e}")
+    
+    return jobs
+
+def scrapeNaukri(kw="software engineer", loc="", maxJobs=20):
+    jobs = []
+    try:
+        qry = kw.replace(' ', '-')
+        locQry = loc.replace(' ', '-') if loc else 'india'
+        url = f"https://www.naukri.com/{qry}-jobs-in-{locQry}"
+        
+        hdrs = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+        
+        resp = requests.get(url, headers=hdrs, timeout=10)
+        
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            cards = soup.find_all('article', class_='jobTuple')[:maxJobs]
+            
+            if not cards:
+                cards = soup.find_all('div', class_='srp-jobtuple-wrapper')[:maxJobs]
+            
+            for card in cards:
+                try:
+                    titleElem = card.find('a', class_='title')
+                    if not titleElem:
+                        titleElem = card.find('a', {'class': lambda x: x and 'title' in x})
+                    
+                    compElem = card.find('a', class_='subTitle')
+                    if not compElem:
+                        compElem = card.find('div', class_='companyInfo')
+                    
+                    locElem = card.find('span', class_='location')
+                    if not locElem:
+                        locElem = card.find('li', class_='location')
+                    
+                    if titleElem:
+                        title = titleElem.text.strip()
+                        comp = compElem.text.strip() if compElem else 'Company in India'
+                        l = locElem.text.strip() if locElem else 'India'
+                        
+                        job = {
+                            'title': title,
+                            'company': comp,
+                            'location': l,
+                            'link': f"https://www.naukri.com{titleElem['href']}" if titleElem.get('href') else 'https://www.naukri.com',
+                            'description': f"{title} at {comp}",
+                            'required_skills': extractSkillsFromTitle(title)
+                        }
+                        jobs.append(job)
+                except Exception as e:
+                    print(f"Error parsing Naukri job: {e}")
+                    continue
+            
+            print(f"Scraped {len(jobs)} jobs from Naukri")
+        else:
+            print(f"Naukri fetch failed: {resp.status_code}")
+            
+    except Exception as e:
+        print(f"Error scraping Naukri: {e}")
+    
+    return jobs
+
+def scrapeInstahyre(kw="software", maxJobs=20):
+    jobs = []
+    try:
+        url = f"https://www.instahyre.com/search-jobs/?q={kw.replace(' ', '+')}"
+        hdrs = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        resp = requests.get(url, headers=hdrs, timeout=10)
+        
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            cards = soup.find_all('div', class_='opportunity-card')[:maxJobs]
+            
+            for card in cards:
+                try:
+                    titleElem = card.find('h3')
+                    compElem = card.find('p', class_='company-name')
+                    locElem = card.find('span', class_='location')
+                    
+                    if titleElem:
+                        title = titleElem.text.strip()
+                        comp = compElem.text.strip() if compElem else 'Indian Tech Company'
+                        l = locElem.text.strip() if locElem else 'India'
+                        
+                        job = {
+                            'title': title,
+                            'company': comp,
+                            'location': l,
+                            'link': 'https://www.instahyre.com',
+                            'description': f"{title} at {comp}",
+                            'required_skills': extractSkillsFromTitle(title)
+                        }
+                        jobs.append(job)
+                except Exception as e:
+                    print(f"Error parsing Instahyre job: {e}")
+                    continue
+            
+            print(f"Scraped {len(jobs)} jobs from Instahyre")
+        else:
+            print(f"Instahyre fetch failed: {resp.status_code}")
+            
+    except Exception as e:
+        print(f"Error scraping Instahyre: {e}")
+    
+    return jobs
+
+def getIndianFallback():
+    return [
+        {'title': 'Python Developer', 'company': 'TCS', 'location': 'Bangalore, India', 'description': 'Python developer for enterprise', 'required_skills': ['python', 'django', 'sql', 'rest api', 'git'], 'link': 'https://www.tcs.com/careers'},
+        {'title': 'Full Stack Developer', 'company': 'Infosys', 'location': 'Hyderabad, India', 'description': 'Full stack with React and Node.js', 'required_skills': ['javascript', 'react', 'node', 'mongodb', 'html', 'css'], 'link': 'https://www.infosys.com/careers'},
+        {'title': 'Data Analyst', 'company': 'Wipro', 'location': 'Pune, India', 'description': 'Data analyst with Excel and SQL', 'required_skills': ['excel', 'sql', 'python', 'data analysis', 'tableau'], 'link': 'https://careers.wipro.com'},
+        {'title': 'VBA Developer', 'company': 'Accenture India', 'location': 'Mumbai, India', 'description': 'VBA developer for Excel automation', 'required_skills': ['vba', 'excel', 'macros', 'sql', 'access'], 'link': 'https://www.accenture.com/in-en/careers'},
+        {'title': 'Java Developer', 'company': 'HCL Technologies', 'location': 'Chennai, India', 'description': 'Java backend developer', 'required_skills': ['java', 'spring', 'sql', 'rest api', 'microservices'], 'link': 'https://www.hcltech.com/careers'},
+        {'title': 'DevOps Engineer', 'company': 'Tech Mahindra', 'location': 'Bangalore, India', 'description': 'DevOps with AWS and Docker', 'required_skills': ['aws', 'docker', 'kubernetes', 'jenkins', 'linux'], 'link': 'https://www.techmahindra.com/careers'},
+        {'title': 'React Developer', 'company': 'Cognizant', 'location': 'Noida, India', 'description': 'Frontend React developer', 'required_skills': ['react', 'javascript', 'html', 'css', 'typescript'], 'link': 'https://careers.cognizant.com'},
+        {'title': 'Business Analyst', 'company': 'Capgemini India', 'location': 'Gurgaon, India', 'description': 'Business analyst with Excel and VBA', 'required_skills': ['excel', 'vba', 'sql', 'power bi', 'data analysis'], 'link': 'https://www.capgemini.com/in-en/careers'}
+    ]
+
+def scrapeJobsMulti(kw="software engineer", loc="", maxJobs=20):
+    allJobs = []
+    
+    print("Trying Naukri.com...")
+    naukri = scrapeNaukri(kw, loc or "india", maxJobs=8)
+    allJobs.extend(naukri)
+    
+    print("Trying Instahyre...")
+    insta = scrapeInstahyre(kw, maxJobs=5)
+    allJobs.extend(insta)
+    
+    print("Trying RemoteOK...")
+    remote = scrapeRemoteOk(kw.split()[0], maxJobs=7)
+    allJobs.extend(remote)
+    
+    if len(allJobs) < maxJobs:
+        print("Trying Indeed...")
+        indeed = scrapeIndeed(kw, loc, maxJobs=5)
+        allJobs.extend(indeed)
+    
+    if len(allJobs) < 10:
+        print("Adding fallback jobs...")
+        allJobs.extend(getIndianFallback())
+    
+    seen = set()
+    unique = []
+    for job in allJobs:
+        key = (job['title'].lower(), job['company'].lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(job)
+    
+    return unique[:maxJobs]
+
+def extractSkillsFromTitle(title):
+    titleLow = title.lower()
+    skillMap = {
+        'python': ['python'], 'java': ['java'], 'javascript': ['javascript', 'js'], 'react': ['react', 'reactjs'],
+        'node': ['node', 'node.js', 'nodejs'], 'aws': ['aws', 'amazon web services'], 'azure': ['azure'],
+        'docker': ['docker'], 'kubernetes': ['kubernetes', 'k8s'], 'sql': ['sql', 'mysql', 'postgresql'],
+        'machine learning': ['machine learning', 'ml'], 'data science': ['data science', 'data scientist'],
+        'devops': ['devops'], 'frontend': ['frontend', 'front-end', 'front end'],
+        'backend': ['backend', 'back-end', 'back end'], 'full stack': ['full stack', 'fullstack', 'full-stack'],
+        'angular': ['angular'], 'vue': ['vue', 'vuejs'], 'django': ['django'], 'flask': ['flask'],
+        'api': ['api', 'rest', 'restful'], 'git': ['git', 'github'], 'typescript': ['typescript', 'ts'],
+        'mongodb': ['mongodb', 'mongo'], 'redis': ['redis'], 'ci/cd': ['ci/cd', 'cicd', 'jenkins'],
+        'agile': ['agile', 'scrum'], 'testing': ['testing', 'test', 'qa'],
     }
-]
+    
+    found = []
+    for skill, kws in skillMap.items():
+        if any(kw in titleLow for kw in kws):
+            found.append(skill)
+    
+    if not found:
+        if 'engineer' in titleLow or 'developer' in titleLow:
+            found = ['programming', 'software development', 'problem solving']
+        elif 'data' in titleLow:
+            found = ['data analysis', 'sql', 'python']
+        elif 'manager' in titleLow:
+            found = ['management', 'leadership', 'agile']
+        else:
+            found = ['communication', 'teamwork', 'problem solving']
+    
+    return found
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def getFallbackJobs():
+    indJobs = getIndianFallback()
+    intlJobs = [
+        {'title': 'Senior Python Developer', 'company': 'TechCorp Solutions', 'location': 'Remote', 'description': 'Experienced Python developer for scalable backend', 'required_skills': ['python', 'django', 'flask', 'api', 'sql', 'git', 'docker'], 'link': 'https://example.com/jobs/python-dev'},
+        {'title': 'Data Scientist', 'company': 'DataTech Analytics', 'location': 'Remote', 'description': 'Data Scientist with ML and Python', 'required_skills': ['python', 'machine learning', 'data analysis', 'sql', 'pandas', 'numpy'], 'link': 'https://example.com/jobs/data-scientist'},
+        {'title': 'DevOps Engineer', 'company': 'Cloud Infrastructure Co', 'location': 'Remote', 'description': 'DevOps with AWS and Kubernetes', 'required_skills': ['docker', 'kubernetes', 'aws', 'ci/cd', 'linux', 'git', 'python'], 'link': 'https://example.com/jobs/devops'},
+        {'title': 'Frontend React Developer', 'company': 'UI/UX Studios', 'location': 'Remote', 'description': 'Frontend React developer', 'required_skills': ['react', 'javascript', 'html', 'css', 'typescript', 'git'], 'link': 'https://example.com/jobs/frontend'}
+    ]
+    return indJobs + intlJobs
 
-def extract_text_from_docx(file_path):
-    return docx2txt.process(file_path)
+def getJobsDb(forceRefresh=False):
+    global jobCache, cacheTime
+    
+    curTime = time.time()
+    cacheAge = curTime - cacheTime if cacheTime > 0 else 0
+    
+    if not forceRefresh and jobCache and cacheAge < cacheDur:
+        cacheMin = int(cacheAge / 60)
+        print(f"Using cached jobs (cached {cacheMin} min ago)")
+        return jobCache
+    
+    print("Scraping fresh jobs...")
+    jobs = scrapeJobsMulti(kw="software developer", loc="", maxJobs=25)
+    
+    scrapeTime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    if not jobs or len(jobs) == 0:
+        print("Scraping failed, using fallback")
+        jobs = getFallbackJobs()
+        for job in jobs:
+            job['scraped_at'] = scrapeTime
+            job['is_fallback'] = True
+    else:
+        print(f"Got {len(jobs)} fresh jobs")
+        for job in jobs:
+            job['scraped_at'] = scrapeTime
+            job['is_fallback'] = False
+    
+    jobCache = jobs
+    cacheTime = curTime
+    
+    return jobs
 
-def extract_email(text):
-    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    emails = re.findall(email_pattern, text)
+def allowedFile(fname):
+    return '.' in fname and fname.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def extractPdf(fpath):
+    txt = ""
+    try:
+        with open(fpath, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                txt += page.extract_text()
+    except Exception as e:
+        print(f"PDF extract error: {e}")
+    return txt
+
+def extractDocx(fpath):
+    try:
+        return docx2txt.process(fpath)
+    except Exception as e:
+        print(f"DOCX extract error: {e}")
+        return ""
+
+def extractDoc(fpath):
+    try:
+        return docx2txt.process(fpath)
+    except Exception as e:
+        print(f"DOC extract error: {e}")
+        return ""
+
+def extractResume(fpath):
+    ext = fpath.rsplit('.', 1)[1].lower()
+    if ext == 'pdf':
+        return extractPdf(fpath)
+    elif ext == 'docx':
+        return extractDocx(fpath)
+    elif ext == 'doc':
+        return extractDoc(fpath)
+    else:
+        return ""
+
+def extractEmail(txt):
+    pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    emails = re.findall(pattern, txt)
     return emails[0] if emails else None
 
-def extract_phone(text):
-    phone_pattern = r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]'
-    phones = re.findall(phone_pattern, text)
+def extractPhone(txt):
+    pattern = r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]'
+    phones = re.findall(pattern, txt)
     return phones[0] if phones else None
 
-def extract_skills(text):
-    text_lower = text.lower()
+def extractSkills(txt):
+    txtLow = txt.lower()
+    skillKws = {
+        'python', 'java', 'javascript', 'c++', 'c#', 'ruby', 'php', 'swift', 'kotlin', 'go', 'rust', 'typescript',
+        'vba', 'visual basic', 'r', 'matlab', 'scala', 'perl',
+        'html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'spring', 'asp.net',
+        'sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sqlite', 'cassandra', 'dynamodb',
+        'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'ci/cd', 'terraform', 'ansible',
+        'machine learning', 'deep learning', 'data analysis', 'pandas', 'numpy', 'scikit-learn', 
+        'tensorflow', 'pytorch', 'keras', 'statistics', 'data visualization', 'tableau', 'power bi',
+        'android', 'ios', 'react native', 'flutter', 'mobile development',
+        'excel', 'vba', 'macros', 'power query', 'power pivot', 'access', 'word', 'powerpoint',
+        'git', 'agile', 'scrum', 'rest api', 'graphql', 'microservices', 'linux', 'unix',
+        'api', 'rest', 'testing', 'junit', 'selenium'
+    }
     
-    all_skills = set()
-    for job in JOB_DATABASE:
-        all_skills.update(job['required_skills'])
+    found = []
+    for skill in skillKws:
+        if skill in txtLow:
+            found.append(skill)
     
-    found_skills = []
-    for skill in all_skills:
-        if skill in text_lower:
-            found_skills.append(skill)
-    
-    return found_skills
+    return found
 
-def calculate_job_match(resume_skills, job_skills):
-    if not job_skills:
+def calcMatch(resumeSkills, jobSkills):
+    if not jobSkills or not resumeSkills:
         return 0
     
-    matching_skills = set(resume_skills) & set(job_skills)
-    match_percentage = (len(matching_skills) / len(job_skills)) * 100
+    resumeLow = [s.lower().strip() for s in resumeSkills]
+    jobLow = [s.lower().strip() for s in jobSkills]
     
-    return min(match_percentage, 100)
+    exact = set(resumeLow) & set(jobLow)
+    
+    partial = 0
+    for rs in resumeLow:
+        for js in jobLow:
+            if rs not in exact and js not in exact:
+                if rs in js or js in rs:
+                    partial += 0.5
+                    break
+    
+    total = len(exact) + partial
+    pct = (total / len(jobLow)) * 100
+    
+    return min(pct, 100)
 
-def recommend_jobs(resume_skills, top_n=5):
-    job_matches = []
+def recommendJobs(resumeSkills, topN=10, minMatch=10, locFilter=None, skillFilter=None):
+    matches = []
+    jobsDb = getJobsDb()
     
-    for job in JOB_DATABASE:
-        match_score = calculate_job_match(resume_skills, job['required_skills'])
+    print(f"Got {len(jobsDb)} jobs from db")
+    print(f"Resume skills: {resumeSkills}")
+    
+    for job in jobsDb:
+        score = calcMatch(resumeSkills, job['required_skills'])
         
-        if match_score > 0:
-            job_matches.append({
+        resumeLow = [s.lower().strip() for s in resumeSkills]
+        jobLow = [s.lower().strip() for s in job['required_skills']]
+        matching = []
+        
+        for rs in resumeSkills:
+            for js in job['required_skills']:
+                if rs.lower() == js.lower() or rs.lower() in js.lower() or js.lower() in rs.lower():
+                    if js not in matching:
+                        matching.append(js)
+        
+        if locFilter and locFilter.lower() not in job.get('location', '').lower():
+            continue
+            
+        if skillFilter:
+            filterLow = [s.lower().strip() for s in skillFilter]
+            hasSkill = any(
+                any(sf in js or js in sf for js in jobLow)
+                for sf in filterLow
+            )
+            if not hasSkill:
+                continue
+        
+        if score >= minMatch:
+            matches.append({
                 'title': job['title'],
                 'company': job['company'],
+                'location': job.get('location', 'Not specified'),
                 'description': job['description'],
-                'match': round(match_score, 1),
-                'matching_skills': list(set(resume_skills) & set(job['required_skills']))
+                'match': round(score, 1),
+                'matching_skills': matching,
+                'link': job.get('link', ''),
+                'required_skills': job['required_skills']
             })
     
-    job_matches.sort(key=lambda x: x['match'], reverse=True)
+    matches.sort(key=lambda x: x['match'], reverse=True)
     
-    return job_matches[:top_n]
+    print(f"Returning {len(matches[:topN])} jobs (filtered from {len(matches)} matches)")
+    
+    return matches[:topN]
 
-def generate_ml_metrics():
-    return {
-        'decision_tree': {
-            'accuracy': 0.85,
-            'precision': 0.83,
-            'recall': 0.87,
-            'f1_score': 0.85,
-            'confusion_matrix': [[42, 8], [6, 44]],
-            'auc_score': 0.86,
-            'support': {'rejected': 50, 'accepted': 50},
-            'roc_curve': {
-                'fpr': [0.0, 0.16, 0.24, 1.0],
-                'tpr': [0.0, 0.82, 0.87, 1.0]
-            }
-        },
-        'logistic_regression': {
-            'accuracy': 0.82,
-            'precision': 0.80,
-            'recall': 0.85,
-            'f1_score': 0.82,
-            'confusion_matrix': [[40, 10], [8, 42]],
-            'auc_score': 0.83,
-            'support': {'rejected': 50, 'accepted': 50},
-            'roc_curve': {
-                'fpr': [0.0, 0.20, 0.28, 1.0],
-                'tpr': [0.0, 0.78, 0.85, 1.0]
-            }
-        },
-        'random_forest': {
-            'accuracy': 0.89,
-            'precision': 0.88,
-            'recall': 0.90,
-            'f1_score': 0.89,
-            'confusion_matrix': [[45, 5], [5, 45]],
-            'auc_score': 0.92,
-            'support': {'rejected': 50, 'accepted': 50},
-            'roc_curve': {
-                'fpr': [0.0, 0.10, 0.15, 1.0],
-                'tpr': [0.0, 0.88, 0.90, 1.0]
-            }
-        },
-        'feature_importance': [
-            {'feature': 'Python', 'importance': 0.25},
-            {'feature': 'Machine Learning', 'importance': 0.22},
-            {'feature': 'Data Analysis', 'importance': 0.18},
-            {'feature': 'Experience Years', 'importance': 0.15},
-            {'feature': 'Education', 'importance': 0.12},
-            {'feature': 'Projects', 'importance': 0.08}
-        ],
-        'cross_validation': {
-            'decision_tree': [0.83, 0.85, 0.84, 0.86, 0.85],
-            'logistic_regression': [0.80, 0.82, 0.81, 0.83, 0.82],
-            'random_forest': [0.88, 0.89, 0.90, 0.88, 0.89]
-        }
-    }
+
 
 @app.route('/api/upload', methods=['POST'])
-def upload_resume():
+def uploadResume():
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
     
@@ -205,46 +523,580 @@ def upload_resume():
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
+    if file and allowedFile(file.filename):
+        fname = secure_filename(file.filename)
+        fpath = os.path.join(app.config['UPLOAD_FOLDER'], fname)
+        file.save(fpath)
         
-        text = extract_text_from_docx(filepath)
+        txt = extractResume(fpath)
+        email = extractEmail(txt)
+        phone = extractPhone(txt)
+        resumeSkills = extractSkills(txt)
         
-        email = extract_email(text)
-        phone = extract_phone(text)
+        print(f"Extracted {len(resumeSkills)} skills")
+        print(f"Skills: {resumeSkills}")
         
-        resume_skills = extract_skills(text)
+        allJobs = recommendJobs(resumeSkills, topN=50, minMatch=0)
         
-        jobs = recommend_jobs(resume_skills, top_n=5)
+        locs = list(set([job['location'] for job in allJobs if job['location'] != 'Not specified']))
+        allSkillsSet = set()
+        for job in allJobs:
+            allSkillsSet.update(job.get('required_skills', []))
+        availSkills = sorted(list(allSkillsSet))
+        
+        jobs = recommendJobs(resumeSkills, topN=20, minMatch=10)
+        
+        print(f"Got {len(jobs)} recommendations")
         
         if not jobs:
-            jobs = [{
-                'title': 'No matches found',
-                'company': 'N/A',
-                'match': 0,
-                'description': 'Please update your resume with more relevant skills',
-                'matching_skills': []
-            }]
+            print("No jobs with >10% match, lowering threshold")
+            jobs = recommendJobs(resumeSkills, topN=20, minMatch=0)
         
-        ml_metrics = generate_ml_metrics()
+        cacheAge = time.time() - cacheTime if cacheTime > 0 else 0
+        cacheMin = int(cacheAge / 60)
+        lastUpd = datetime.fromtimestamp(cacheTime).strftime("%Y-%m-%d %H:%M:%S") if cacheTime > 0 else "Just now"
         
         return jsonify({
             'success': True,
-            'filename': filename,
+            'filename': fname,
             'email': email,
             'phone': phone,
-            'skills': resume_skills,
+            'skills': resumeSkills,
             'jobs': jobs,
-            'ml_analysis': ml_metrics
+            'total_jobs': len(jobs),
+            'available_locations': locs,
+            'available_skills': availSkills[:50],
+            'cache_info': {
+                'last_updated': lastUpd,
+                'cache_age_minutes': cacheMin,
+                'is_fresh': cacheAge < cacheDur
+            }
         })
     
     return jsonify({'error': 'Invalid file type'}), 400
 
+@app.route('/api/scrape-jobs', methods=['POST'])
+def scrapeJobs():
+    data = request.get_json() or {}
+    kw = data.get('keywords', 'software engineer')
+    loc = data.get('location', '')
+    maxJobs = data.get('max_jobs', 20)
+    
+    jobs = scrapeJobsMulti(kw=kw, loc=loc, maxJobs=maxJobs)
+    
+    if not jobs:
+        jobs = getFallbackJobs()
+    
+    global jobCache, cacheTime
+    jobCache = jobs
+    cacheTime = time.time()
+    
+    return jsonify({
+        'success': True,
+        'jobs_count': len(jobs),
+        'jobs': jobs,
+        'source': 'scraped' if jobs != getFallbackJobs() else 'fallback'
+    })
+
+@app.route('/api/jobs', methods=['GET'])
+def getJobs():
+    jobs = getJobsDb()
+    return jsonify({
+        'success': True,
+        'jobs_count': len(jobs),
+        'jobs': jobs
+    })
+
+@app.route('/api/filter-jobs', methods=['POST'])
+def filterJobs():
+    data = request.get_json()
+    
+    resumeSkills = data.get('skills', [])
+    locFilter = data.get('location')
+    skillFilters = data.get('skill_filters', [])
+    minMatch = data.get('min_match', 10)
+    
+    print(f"Filtering: loc={locFilter}, skills={skillFilters}, minMatch={minMatch}")
+    
+    jobs = recommendJobs(
+        resumeSkills, 
+        topN=50, 
+        minMatch=minMatch,
+        locFilter=locFilter,
+        skillFilter=skillFilters if skillFilters else None
+    )
+    
+    return jsonify({
+        'success': True,
+        'jobs': jobs,
+        'total_jobs': len(jobs)
+    })
+
+@app.route('/api/cache-status', methods=['GET'])
+def cacheStatus():
+    curTime = time.time()
+    cacheAge = curTime - cacheTime if cacheTime > 0 else 0
+    cacheMin = int(cacheAge / 60)
+    
+    isFresh = cacheAge < cacheDur
+    lastUpd = datetime.fromtimestamp(cacheTime).strftime("%Y-%m-%d %H:%M:%S") if cacheTime > 0 else "Never"
+    
+    return jsonify({
+        'cache_age_minutes': cacheMin,
+        'is_fresh': isFresh,
+        'last_updated': lastUpd,
+        'jobs_count': len(jobCache),
+        'cache_duration_minutes': int(cacheDur / 60)
+    })
+
+@app.route('/api/refresh-jobs', methods=['POST'])
+def refreshJobs():
+    print("Force refreshing jobs...")
+    jobs = getJobsDb(forceRefresh=True)
+    
+    return jsonify({
+        'success': True,
+        'jobs_count': len(jobs),
+        'message': f'Refreshed {len(jobs)} jobs from live sources',
+        'timestamp': time.time()
+    })
+
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok'})
+
+@app.route('/api/export-excel', methods=['POST'])
+def exportExcel():
+    data = request.get_json()
+    
+    fname = data.get('filename', 'resume')
+    email = data.get('email', 'N/A')
+    phone = data.get('phone', 'N/A')
+    skills = data.get('skills', [])
+    jobs = data.get('jobs', [])
+    
+    wb = Workbook()
+    wsSummary = wb.active
+    wsSummary.title = "Dashboard"
+    
+    hdrFill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid")
+    hdrFont = Font(bold=True, color="FFFFFF", size=14)
+    
+    wsSummary['A1'] = "RESUME JOB MATCH REPORT"
+    wsSummary['A1'].font = Font(bold=True, size=16, color="2E7D32")
+    wsSummary.merge_cells('A1:D1')
+    
+    wsSummary['A3'] = "Resume Information"
+    wsSummary['A3'].font = hdrFont
+    wsSummary['A3'].fill = hdrFill
+    wsSummary.merge_cells('A3:D3')
+    
+    wsSummary['A4'] = "Filename:"
+    wsSummary['B4'] = fname
+    wsSummary['A5'] = "Email:"
+    wsSummary['B5'] = email
+    wsSummary['A6'] = "Phone:"
+    wsSummary['B6'] = phone
+    wsSummary['A7'] = "Skills Found:"
+    wsSummary['B7'] = len(skills)
+    wsSummary['A8'] = "Report Date:"
+    wsSummary['B8'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    wsSummary['A10'] = "Job Match Statistics"
+    wsSummary['A10'].font = hdrFont
+    wsSummary['A10'].fill = hdrFill
+    wsSummary.merge_cells('A10:D10')
+    
+    wsSummary['A11'] = "Total Jobs Found:"
+    wsSummary['B11'] = len(jobs)
+    
+    if jobs:
+        avgMatch = sum(job['match'] for job in jobs) / len(jobs)
+        topMatch = max(job['match'] for job in jobs)
+        
+        wsSummary['A12'] = "Average Match:"
+        wsSummary['B12'] = f"{avgMatch:.1f}%"
+        wsSummary['A13'] = "Top Match:"
+        wsSummary['B13'] = f"{topMatch:.1f}%"
+        
+        excellent = len([j for j in jobs if j['match'] >= 70])
+        good = len([j for j in jobs if 50 <= j['match'] < 70])
+        fair = len([j for j in jobs if 30 <= j['match'] < 50])
+        low = len([j for j in jobs if j['match'] < 30])
+        
+        wsSummary['A15'] = "Match Distribution"
+        wsSummary['A15'].font = hdrFont
+        wsSummary['A15'].fill = hdrFill
+        wsSummary.merge_cells('A15:D15')
+        
+        wsSummary['A16'] = "Excellent (70%+):"
+        wsSummary['B16'] = excellent
+        wsSummary['A17'] = "Good (50-69%):"
+        wsSummary['B17'] = good
+        wsSummary['A18'] = "Fair (30-49%):"
+        wsSummary['B18'] = fair
+        wsSummary['A19'] = "Low (<30%):"
+        wsSummary['B19'] = low
+    
+    wsSummary.column_dimensions['A'].width = 20
+    wsSummary.column_dimensions['B'].width = 30
+    
+    wsSkills = wb.create_sheet("Skills")
+    wsSkills['A1'] = "Detected Skills"
+    wsSkills['A1'].font = hdrFont
+    wsSkills['A1'].fill = hdrFill
+    
+    for idx, skill in enumerate(skills, start=2):
+        wsSkills[f'A{idx}'] = skill
+    
+    wsSkills.column_dimensions['A'].width = 25
+    
+    wsJobs = wb.create_sheet("Job Matches")
+    
+    hdrs = ['#', 'Job Title', 'Company', 'Location', 'Match %', 'Matching Skills', 'Link']
+    for col, hdr in enumerate(hdrs, start=1):
+        cell = wsJobs.cell(row=1, column=col)
+        cell.value = hdr
+        cell.font = hdrFont
+        cell.fill = hdrFill
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    for idx, job in enumerate(jobs, start=2):
+        wsJobs.cell(row=idx, column=1, value=idx-1)
+        wsJobs.cell(row=idx, column=2, value=job['title'])
+        wsJobs.cell(row=idx, column=3, value=job['company'])
+        wsJobs.cell(row=idx, column=4, value=job.get('location', 'N/A'))
+        
+        matchCell = wsJobs.cell(row=idx, column=5, value=job['match'])
+        if job['match'] >= 70:
+            matchCell.fill = PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid")
+        elif job['match'] >= 50:
+            matchCell.fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+        elif job['match'] >= 30:
+            matchCell.fill = PatternFill(start_color="FFCCBC", end_color="FFCCBC", fill_type="solid")
+        
+        wsJobs.cell(row=idx, column=6, value=', '.join(job.get('matching_skills', [])))
+        wsJobs.cell(row=idx, column=7, value=job.get('link', ''))
+    
+    wsJobs.column_dimensions['A'].width = 5
+    wsJobs.column_dimensions['B'].width = 30
+    wsJobs.column_dimensions['C'].width = 25
+    wsJobs.column_dimensions['D'].width = 20
+    wsJobs.column_dimensions['E'].width = 10
+    wsJobs.column_dimensions['F'].width = 40
+    wsJobs.column_dimensions['G'].width = 50
+    
+    wsTop = wb.create_sheet("Top 10 Matches")
+    wsTop['A1'] = "TOP 10 JOB MATCHES"
+    wsTop['A1'].font = Font(bold=True, size=14, color="2E7D32")
+    wsTop.merge_cells('A1:E1')
+    
+    topHdrs = ['Rank', 'Job Title', 'Company', 'Match %', 'Location']
+    for col, hdr in enumerate(topHdrs, start=1):
+        cell = wsTop.cell(row=2, column=col)
+        cell.value = hdr
+        cell.font = hdrFont
+        cell.fill = hdrFill
+    
+    topJobs = sorted(jobs, key=lambda x: x['match'], reverse=True)[:10]
+    for idx, job in enumerate(topJobs, start=3):
+        wsTop.cell(row=idx, column=1, value=idx-2)
+        wsTop.cell(row=idx, column=2, value=job['title'])
+        wsTop.cell(row=idx, column=3, value=job['company'])
+        wsTop.cell(row=idx, column=4, value=job['match'])
+        wsTop.cell(row=idx, column=5, value=job.get('location', 'N/A'))
+    
+    wsTop.column_dimensions['A'].width = 8
+    wsTop.column_dimensions['B'].width = 35
+    wsTop.column_dimensions['C'].width = 25
+    wsTop.column_dimensions['D'].width = 12
+    wsTop.column_dimensions['E'].width = 20
+    
+    exportFname = f"job_matches_{fname.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    exportPath = os.path.join(app.config['UPLOAD_FOLDER'], exportFname)
+    wb.save(exportPath)
+    
+    absPath = os.path.abspath(exportPath)
+    
+    return jsonify({
+        'success': True,
+        'message': 'Excel report generated',
+        'filename': exportFname,
+        'filepath': absPath,
+        'relative_path': f'backend/uploads/{exportFname}'
+    })
+def export_excel():
+    """Export job matches to Excel with VBA-style formatting and charts"""
+    data = request.get_json()
+    
+    filename = data.get('filename', 'resume')
+    email = data.get('email', 'N/A')
+    phone = data.get('phone', 'N/A')
+    skills = data.get('skills', [])
+    jobs = data.get('jobs', [])
+    
+    # Create workbook
+    wb = Workbook()
+    
+    # Sheet 1: Summary Dashboard
+    ws_summary = wb.active
+    ws_summary.title = "Dashboard"
+    
+    # Header styling
+    header_fill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=14)
+    
+    # Title
+    ws_summary['A1'] = "RESUME JOB MATCH REPORT"
+    ws_summary['A1'].font = Font(bold=True, size=16, color="2E7D32")
+    ws_summary.merge_cells('A1:D1')
+    
+    # Resume Info
+    ws_summary['A3'] = "Resume Information"
+    ws_summary['A3'].font = header_font
+    ws_summary['A3'].fill = header_fill
+    ws_summary.merge_cells('A3:D3')
+    
+    ws_summary['A4'] = "Filename:"
+    ws_summary['B4'] = filename
+    ws_summary['A5'] = "Email:"
+    ws_summary['B5'] = email
+    ws_summary['A6'] = "Phone:"
+    ws_summary['B6'] = phone
+    ws_summary['A7'] = "Skills Found:"
+    ws_summary['B7'] = len(skills)
+    ws_summary['A8'] = "Report Date:"
+    ws_summary['B8'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Job Statistics
+    ws_summary['A10'] = "Job Match Statistics"
+    ws_summary['A10'].font = header_font
+    ws_summary['A10'].fill = header_fill
+    ws_summary.merge_cells('A10:D10')
+    
+    ws_summary['A11'] = "Total Jobs Found:"
+    ws_summary['B11'] = len(jobs)
+    
+    if jobs:
+        avg_match = sum(job['match'] for job in jobs) / len(jobs)
+        top_match = max(job['match'] for job in jobs)
+        
+        ws_summary['A12'] = "Average Match:"
+        ws_summary['B12'] = f"{avg_match:.1f}%"
+        ws_summary['A13'] = "Top Match:"
+        ws_summary['B13'] = f"{top_match:.1f}%"
+        
+        # Match distribution
+        excellent = len([j for j in jobs if j['match'] >= 70])
+        good = len([j for j in jobs if 50 <= j['match'] < 70])
+        fair = len([j for j in jobs if 30 <= j['match'] < 50])
+        low = len([j for j in jobs if j['match'] < 30])
+        
+        ws_summary['A15'] = "Match Distribution"
+        ws_summary['A15'].font = header_font
+        ws_summary['A15'].fill = header_fill
+        ws_summary.merge_cells('A15:D15')
+        
+        ws_summary['A16'] = "Excellent (70%+):"
+        ws_summary['B16'] = excellent
+        ws_summary['A17'] = "Good (50-69%):"
+        ws_summary['B17'] = good
+        ws_summary['A18'] = "Fair (30-49%):"
+        ws_summary['B18'] = fair
+        ws_summary['A19'] = "Low (<30%):"
+        ws_summary['B19'] = low
+    
+    # Adjust column widths
+    ws_summary.column_dimensions['A'].width = 20
+    ws_summary.column_dimensions['B'].width = 30
+    
+    # Sheet 2: Skills
+    ws_skills = wb.create_sheet("Skills")
+    ws_skills['A1'] = "Detected Skills"
+    ws_skills['A1'].font = header_font
+    ws_skills['A1'].fill = header_fill
+    
+    for idx, skill in enumerate(skills, start=2):
+        ws_skills[f'A{idx}'] = skill
+    
+    ws_skills.column_dimensions['A'].width = 25
+    
+    # Sheet 3: Job Matches
+    ws_jobs = wb.create_sheet("Job Matches")
+    
+    # Headers
+    headers = ['#', 'Job Title', 'Company', 'Location', 'Match %', 'Matching Skills', 'Link']
+    for col, header in enumerate(headers, start=1):
+        cell = ws_jobs.cell(row=1, column=col)
+        cell.value = header
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    # Job data
+    for idx, job in enumerate(jobs, start=2):
+        ws_jobs.cell(row=idx, column=1, value=idx-1)
+        ws_jobs.cell(row=idx, column=2, value=job['title'])
+        ws_jobs.cell(row=idx, column=3, value=job['company'])
+        ws_jobs.cell(row=idx, column=4, value=job.get('location', 'N/A'))
+        
+        match_cell = ws_jobs.cell(row=idx, column=5, value=job['match'])
+        # Color code based on match percentage
+        if job['match'] >= 70:
+            match_cell.fill = PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid")
+        elif job['match'] >= 50:
+            match_cell.fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+        elif job['match'] >= 30:
+            match_cell.fill = PatternFill(start_color="FFCCBC", end_color="FFCCBC", fill_type="solid")
+        
+        ws_jobs.cell(row=idx, column=6, value=', '.join(job.get('matching_skills', [])))
+        ws_jobs.cell(row=idx, column=7, value=job.get('link', ''))
+    
+    # Adjust column widths
+    ws_jobs.column_dimensions['A'].width = 5
+    ws_jobs.column_dimensions['B'].width = 30
+    ws_jobs.column_dimensions['C'].width = 25
+    ws_jobs.column_dimensions['D'].width = 20
+    ws_jobs.column_dimensions['E'].width = 10
+    ws_jobs.column_dimensions['F'].width = 40
+    ws_jobs.column_dimensions['G'].width = 50
+    
+    # Sheet 4: Top Matches (Top 10)
+    ws_top = wb.create_sheet("Top 10 Matches")
+    ws_top['A1'] = "TOP 10 JOB MATCHES"
+    ws_top['A1'].font = Font(bold=True, size=14, color="2E7D32")
+    ws_top.merge_cells('A1:E1')
+    
+    top_headers = ['Rank', 'Job Title', 'Company', 'Match %', 'Location']
+    for col, header in enumerate(top_headers, start=1):
+        cell = ws_top.cell(row=2, column=col)
+        cell.value = header
+        cell.font = header_font
+        cell.fill = header_fill
+    
+    top_jobs = sorted(jobs, key=lambda x: x['match'], reverse=True)[:10]
+    for idx, job in enumerate(top_jobs, start=3):
+        ws_top.cell(row=idx, column=1, value=idx-2)
+        ws_top.cell(row=idx, column=2, value=job['title'])
+        ws_top.cell(row=idx, column=3, value=job['company'])
+        ws_top.cell(row=idx, column=4, value=job['match'])
+        ws_top.cell(row=idx, column=5, value=job.get('location', 'N/A'))
+    
+    ws_top.column_dimensions['A'].width = 8
+    ws_top.column_dimensions['B'].width = 35
+    ws_top.column_dimensions['C'].width = 25
+    ws_top.column_dimensions['D'].width = 12
+    ws_top.column_dimensions['E'].width = 20
+    
+    # Save file
+    export_filename = f"job_matches_{filename.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    export_path = os.path.join(app.config['UPLOAD_FOLDER'], export_filename)
+    wb.save(export_path)
+    
+    # Return success message with file location instead of downloading
+    return jsonify({
+        'success': True,
+        'message': 'Excel report generated successfully!',
+        'filename': export_filename,
+        'filepath': export_path,
+        'location': f'Saved in: backend/uploads/{export_filename}'
+    })
+
+@app.route('/api/bulk-process', methods=['POST'])
+def bulkProcess():
+    uploadDir = app.config['UPLOAD_FOLDER']
+    
+    resumeFiles = []
+    for ext in ['*.pdf', '*.docx', '*.doc']:
+        resumeFiles.extend(glob.glob(os.path.join(uploadDir, ext)))
+    
+    if not resumeFiles:
+        return jsonify({'error': 'No resume files found'}), 400
+    
+    results = []
+    
+    for fpath in resumeFiles:
+        try:
+            fname = os.path.basename(fpath)
+            txt = extractResume(fpath)
+            email = extractEmail(txt)
+            phone = extractPhone(txt)
+            skills = extractSkills(txt)
+            jobs = recommendJobs(skills, topN=10, minMatch=10)
+            
+            avgMatch = sum(job['match'] for job in jobs) / len(jobs) if jobs else 0
+            topMatch = max(job['match'] for job in jobs) if jobs else 0
+            
+            results.append({
+                'filename': fname,
+                'email': email,
+                'phone': phone,
+                'skills_count': len(skills),
+                'skills': skills,
+                'jobs_found': len(jobs),
+                'avg_match': round(avgMatch, 1),
+                'top_match': round(topMatch, 1),
+                'top_jobs': jobs[:5]
+            })
+            
+        except Exception as e:
+            results.append({
+                'filename': os.path.basename(fpath),
+                'error': str(e)
+            })
+    
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bulk Processing Results"
+    
+    hdrFill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid")
+    hdrFont = Font(bold=True, color="FFFFFF", size=12)
+    
+    hdrs = ['#', 'Filename', 'Email', 'Phone', 'Skills', 'Jobs Found', 'Avg Match %', 'Top Match %', 'Status']
+    for col, hdr in enumerate(hdrs, start=1):
+        cell = ws.cell(row=1, column=col)
+        cell.value = hdr
+        cell.font = hdrFont
+        cell.fill = hdrFill
+    
+    for idx, result in enumerate(results, start=2):
+        ws.cell(row=idx, column=1, value=idx-1)
+        ws.cell(row=idx, column=2, value=result['filename'])
+        ws.cell(row=idx, column=3, value=result.get('email', 'N/A'))
+        ws.cell(row=idx, column=4, value=result.get('phone', 'N/A'))
+        ws.cell(row=idx, column=5, value=result.get('skills_count', 0))
+        ws.cell(row=idx, column=6, value=result.get('jobs_found', 0))
+        ws.cell(row=idx, column=7, value=result.get('avg_match', 0))
+        ws.cell(row=idx, column=8, value=result.get('top_match', 0))
+        ws.cell(row=idx, column=9, value='Error' if 'error' in result else 'Success')
+    
+    ws.column_dimensions['A'].width = 5
+    ws.column_dimensions['B'].width = 30
+    ws.column_dimensions['C'].width = 25
+    ws.column_dimensions['D'].width = 15
+    ws.column_dimensions['E'].width = 10
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 12
+    ws.column_dimensions['H'].width = 12
+    ws.column_dimensions['I'].width = 10
+    
+    bulkFname = f"bulk_processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    bulkPath = os.path.join(uploadDir, bulkFname)
+    wb.save(bulkPath)
+    
+    return jsonify({
+        'success': True,
+        'processed': len(results),
+        'results': results,
+        'excel_report': bulkFname
+    })
+
+@app.route('/api/download-bulk-report/<fname>', methods=['GET'])
+def downloadBulkReport(fname):
+    fpath = os.path.join(app.config['UPLOAD_FOLDER'], fname)
+    if os.path.exists(fpath):
+        return send_file(fpath, as_attachment=True, download_name=fname)
+    return jsonify({'error': 'File not found'}), 404
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
