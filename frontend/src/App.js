@@ -31,9 +31,9 @@ function App() {
             animate={{ scale: 1 }}
             transition={{ duration: 0.3 }}
           >
-            AI Resume Parser
+            Resume Job Matcher
           </motion.h1>
-          <p className="subtitle">Upload your resume and discover perfect job matches</p>
+          <p className="subtitle">Upload your resume and find matching jobs instantly</p>
         </header>
 
         <AnimatePresence mode="wait">
